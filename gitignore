@@ -1,0 +1,22 @@
+# Python
+juniper-env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Database and checkpoints
+juniper_vector_db/
+juniper_index_checkpoint.json
+
+# Books (do not commit PDFs)
+*.pdf
+
+# Ollama
+ollama.tgz
+
+# OS
+.DS_Store
+Thumbs.db
