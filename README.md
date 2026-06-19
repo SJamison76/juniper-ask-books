@@ -34,8 +34,7 @@ the machine.
 
 ## Performance Notice
 
-This system runs on CPU by default. Expect 30 to 90 seconds per query on a
-modern CPU without hardware acceleration.
+Expect 30 to 90 seconds per query on a modern CPU without hardware acceleration.
 
 For fast responses you need one of the following:
 
