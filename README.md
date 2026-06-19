@@ -81,6 +81,59 @@ Examples:
     ./juniper-env/bin/python ask_books.py "how do I configure EVPN VXLAN on an EX switch?"
     ./juniper-env/bin/python ask_books.py "what is the Junos command to check BGP neighbor state?"
 
+Example output:
+
+    $ python ask_books.py "show me a complete EBGP configuration with authentication and route policy on Junos"
+    ============================================================
+    ANSWER:
+    ============================================================
+    Here is the complete EBGP configuration with authentication and route policy:
+
+    set protocols bgp group EBGP type external
+    set protocols bgp group EBGP peer-as 65001
+    set protocols bgp group EBGP neighbor 10.0.0.1
+    set protocols bgp group EBGP authentication key "my_secret_key"
+    set protocols bgp group EBGP authentication algorithm md5
+    set policy-options policy-statement send-direct term 1 from protocol direct
+    set policy-options policy-statement send-direct term 1 then accept
+
+    Explanation:
+
+    set protocols bgp group EBGP type external
+      Sets up an External BGP peer group called EBGP. The type external keyword
+      specifies this is an EBGP peer, as opposed to an IBGP peer.
+
+    set protocols bgp group EBGP peer-as 65001
+      Sets the Autonomous System Number for the EBGP peer group. Replace with
+      your actual peer ASN.
+
+    set protocols bgp group EBGP neighbor 10.0.0.1
+      Specifies the IP address of the neighboring router. Replace with the actual
+      IP address of your BGP neighbor.
+
+    set protocols bgp group EBGP authentication key "my_secret_key"
+      Sets the authentication key for the peer group. Replace with a strong,
+      unique password that meets your organization's security policy.
+
+    set protocols bgp group EBGP authentication algorithm md5
+      Specifies MD5 as the authentication algorithm for the peer group.
+
+    set policy-options policy-statement send-direct term 1 from protocol direct
+      Creates a policy statement called send-direct that matches routes learned
+      directly (not through an intermediate router).
+
+    set policy-options policy-statement send-direct term 1 then accept
+      Accepts routes that match the criteria in the previous line.
+
+    ============================================================
+    SOURCES:
+      EX_Series_UpRunning.pdf — p.177
+      junos-beginners-guide.pdf — p.9
+      ExploreJunosCLI_2ndEd.pdf — p.80
+      TW_HardeningJunosDevices_2ndEd.pdf — p.96, p.151
+      TW_HardeningJunosDevices_2ndEd_Checklist.pdf — p.1
+    ============================================================
+
 ---
 
 ## File Structure
@@ -136,7 +189,7 @@ ask_books.py:
 
 ## Tested On
 
-- Hardware:  AMD Ryzen 7, 32GB RAM
+- Hardware:  GEEKOM A5 Mini PC, AMD Ryzen 5 7430U, 30GB RAM
 - OS:        Ubuntu 26.04 LTS, kernel 7.0.0-22-generic
 - Ollama:    0.30.9
 - ChromaDB:  1.5.9
