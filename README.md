@@ -26,6 +26,11 @@ to reach the Anthropic API. Your PDF content and config data is sent to Anthropi
 as part of the query context. Prompt caching is used across all scripts to reduce API
 costs on repeated queries.
 
+The system is multi-vendor. Drop any vendor's hardening or configuration PDF into
+/srv/ftp/dayone, run index_books.py, and it is immediately available for questions,
+critiques, and config generation. Cisco IOS, IOS XE, NX-OS, and Juniper Junos are
+all supported today. DISA STIG definitions for Cisco devices are planned.
+
 ---
 
 ## Requirements
@@ -34,8 +39,8 @@ costs on repeated queries.
 - Python 3.10 or later
 - Ollama 0.30.9 or later (for embeddings only)
 - 16GB RAM minimum (32GB recommended)
-- Juniper Day One PDF books placed in /srv/ftp/dayone
-- DISA STIG XML files placed in /srv/ftp/stigs (optional, for STIG auditing)
+- Juniper Day One PDF books placed in /srv/ftp/dayone (Cisco and other vendor PDFs also supported)
+- DISA STIG XML files placed in /srv/ftp/stigs (optional, Juniper STIGs supported, Cisco planned)
 - Anthropic API key (see API Key Setup below)
 
 ---
@@ -180,26 +185,6 @@ Recommended for day-to-day use: EX Switch + High only = approximately 25 rules,
 
 ---
 
-## Web Dashboard
-
-Audit reports are served via a local web dashboard that runs automatically on boot.
-No tools or SSH access needed — the team just opens a browser.
-
-    http://<a5-ip>:5000
-
-The dashboard shows all report folders with findings, compliance scores, STIG
-failures with fix commands, Day One critique issues, and links to download all
-report files including the STIG Viewer checklist.
-
-The dashboard is installed as a systemd service by setup.sh and starts
-automatically. To manage it manually:
-
-    sudo systemctl status juniper-dashboard
-    sudo systemctl restart juniper-dashboard
-    journalctl -u juniper-dashboard -f
-
----
-
 ## STIG Viewer
 
 After a STIG audit completes, a populated .cklb checklist is automatically created
@@ -227,6 +212,10 @@ created by STIG Viewer itself and are required for the merge to work:
     SRX_New_Checklist.cklb   SRX Gateway (NDM + ALG + VPN + IDPS)
     RTR_New_Checklist.cklb   Router (NDM + RTR)
 
+Cisco STIG support is planned. When added, Cisco STIG XML files will go into
+/srv/ftp/stigs alongside the Juniper files and the device type menu will be
+updated with Cisco IOS, IOS XE, and NX-OS options.
+
 The stig_audit.txt and critique.txt files are plain text and readable in any editor:
 
     less reports/20260621_143022_192_168_10_203/stig_audit.txt
@@ -249,10 +238,30 @@ Examples:
 
 ---
 
+## Multi-Vendor Support
+
+The system indexes any vendor's PDF documentation and answers questions from whatever
+is in the knowledge base. To add a new vendor simply drop their PDF hardening guides,
+configuration guides, or best practice documents into /srv/ftp/dayone and run:
+
+    ./juniper-env/bin/python index_books.py
+
+Already indexed books are skipped so only new files are processed. The system currently
+has documentation indexed for:
+
+- Juniper Junos OS (36 Day One books covering routing, switching, security, automation)
+- Cisco IOS, IOS XE, NX-OS (hardening guides)
+
+DISA STIG support for Cisco devices is planned for a future update. Currently the STIG
+audit pipeline covers Juniper EX, SRX, and Router platforms only.
+
+---
+
 ## Usage: ask_books.py
 
-Ask any question about Junos OS in plain English. Supports both single question
-mode and an interactive chat loop with conversation history.
+Ask any question about network configuration in plain English. The system searches
+all indexed documentation regardless of vendor and answers from the most relevant
+content found.
 
 Single question mode:
 
@@ -262,19 +271,45 @@ Interactive chat mode (follow-up questions, conversation history maintained):
 
     ./juniper-env/bin/python ask_books.py
 
-Example interactive session:
+Juniper examples:
 
-    Ask a question (or 'exit' to quit): how do I configure OSPF?
+    ./juniper-env/bin/python ask_books.py "how do I configure a BGP neighbor on Junos?"
+    ./juniper-env/bin/python ask_books.py "show me OSPF area configuration on Junos"
+    ./juniper-env/bin/python ask_books.py "how do I configure EVPN VXLAN on an EX switch?"
+
+Cisco examples:
+
+    ./juniper-env/bin/python ask_books.py "how do I harden a Cisco IOS XE switch?"
+    ./juniper-env/bin/python ask_books.py "what is CoPP and how do I configure it on IOS XE?"
+    ./juniper-env/bin/python ask_books.py "how do I configure port security on Cisco NX-OS?"
+
+Example output (Cisco IOS XE question):
+
+    Ask a question (or 'exit' to quit): how do I harden a Cisco IOS XE switch?
+
     📖 Found 10 relevant chunk(s). Asking Claude...
-    💾 Cache written: 1842 tokens cached for next run
+    💾 Cache written: 2572 tokens cached for next run
+
+    PLATFORM: Cisco IOS XE
+
+    CONTROL PLANE - CoPP to restrict SSH to trusted hosts only:
 
     EXAMPLE CONFIG:
-    set protocols ospf area 0 interface ge-0/0/0.0
-    set protocols ospf area 0 interface ge-0/0/1.0
+    access-list 152 deny tcp <trusted-addresses> <mask> any eq 22
+    access-list 152 permit tcp any any eq 22
+    access-list 152 deny ip any any
+    class-map match-all COPP-KNOWN-UNDESIRABLE match access-group 152
+    policy-map COPP-INPUT-POLICY class COPP-KNOWN-UNDESIRABLE drop
+    control-plane service-policy input COPP-INPUT-POLICY
 
-    Ask a question (or 'exit' to quit): how do I add authentication to that?
-    💾 Cache hit: 1842 tokens read from cache
+    Line 1: Denies SSH traffic from trusted addresses so it is not counted as undesirable.
+    Line 2: Permits all other SSH traffic so it can be matched and dropped by the policy.
     ...
+
+    ============================================================
+    SOURCES:
+      Cisco IOS XE Software Hardening Guide.pdf — p.3, p.4, p.28
+    ============================================================
 
 ---
 
@@ -368,7 +403,6 @@ Examples:
 
     juniper-ask-books/
     |-- start.py                  Menu launcher for all tools
-    |-- dashboard.py              Web dashboard — runs as systemd service on port 5000
     |-- ask_books.py              Query the books — single question or interactive chat
     |-- critique_config.py        Offline config auditor — no device connection needed
     |-- stig_audit.py             DoD STIG compliance auditor
