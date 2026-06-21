@@ -102,6 +102,9 @@ def pull_config_from_device(report_dir):
         cmd = "show configuration | display set | no-more"
         stdin, stdout, stderr = ssh.exec_command(cmd)
         config_text = stdout.read().decode("utf-8").strip()
+        stdout.close()
+        stdin.close()
+        stderr.close()
         ssh.close()
 
         if not config_text:
