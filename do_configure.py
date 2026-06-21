@@ -45,8 +45,7 @@ try:
     from jnpr.junos.exception import ConnectError, CommitError, ConfigLoadError
 except ImportError:
     print("❌ PyEZ not installed. Run:")
-    print("   pip install junos-eznc --break-system-packages")
-    print("   or: ./juniper-env/bin/pip install junos-eznc")
+    print("   ./juniper-env/bin/pip install junos-eznc")
     sys.exit(1)
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -91,7 +90,6 @@ try:
     current_config = dev.rpc.get_config(options={"format": "set"})
     config_text = current_config.text
     if not config_text:
-        # fallback: get as text
         current_config = dev.rpc.get_config()
         config_text = str(current_config.tostring(pretty_print=True).decode())
     print(f"✅ Retrieved config ({len(config_text)} characters)")
@@ -100,7 +98,6 @@ except Exception as e:
     dev.close()
     sys.exit(1)
 
-# Truncate config if very large to leave room for book context
 MAX_CONFIG_CHARS = 8000
 if len(config_text) > MAX_CONFIG_CHARS:
     config_text = config_text[:MAX_CONFIG_CHARS]
@@ -140,7 +137,6 @@ docs      = results["documents"][0]
 metas     = results["metadatas"][0]
 distances = results["distances"][0]
 
-# Filter and deduplicate
 seen_pages = set()
 relevant = []
 
@@ -161,7 +157,6 @@ if not relevant:
     dev.close()
     sys.exit(1)
 
-# Build context
 context_parts = []
 sources = {}
 char_count = 0
@@ -180,6 +175,27 @@ for doc, meta, dist in relevant:
 
 context = "\n\n---\n\n".join(context_parts)
 print(f"✅ Found {len(relevant)} relevant chunk(s) from {len(sources)} source(s)")
+
+# ── Shared cached content blocks ──────────────────────────────────────────────
+# These are identical across all three Claude calls so we define them once.
+# Cache strategy:
+#   - book context: same for both passes, cache it (breakpoint 1)
+#   - device config: same for both passes, cache it (breakpoint 2)
+#   - task / question: always dynamic, never cached
+
+cached_book_context = {
+    "type": "text",
+    "text": f"Reference material from Juniper Day One books:\n\n{context}",
+    "cache_control": {"type": "ephemeral"}  # breakpoint 1
+}
+
+cached_device_config = {
+    "type": "text",
+    "text": f"Current device configuration:\n\n{config_text}",
+    "cache_control": {"type": "ephemeral"}  # breakpoint 2
+}
+
+client = anthropic.Anthropic()
 
 # ── Pass 1: Ask Claude what values it needs ───────────────────────────────────
 print(f"\n🤖 Analysing task requirements...")
@@ -203,23 +219,40 @@ gather_system = (
     "Output ONLY the JSON array, no explanation, no markdown."
 )
 
-gather_prompt = (
-    f"Current device configuration:\n\n{config_text}\n\n"
-    f"Reference material:\n\n{context}\n\n"
-    f"Task: {task}\n\n"
-    f"What site-specific values are needed to complete this task?"
-)
-
 try:
-    client = anthropic.Anthropic()
     gather_response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1024,
-        system=gather_system,
-        messages=[{"role": "user", "content": gather_prompt}],
+        system=[
+            {
+                "type": "text",
+                "text": gather_system,
+                "cache_control": {"type": "ephemeral"}  # cache gather system prompt
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    cached_book_context,
+                    cached_device_config,
+                    {
+                        "type": "text",
+                        "text": f"Task: {task}\n\nWhat site-specific values are needed to complete this task?"
+                    }
+                ]
+            }
+        ],
         temperature=0
     )
     gather_raw = gather_response.content[0].text.strip()
+
+    usage = gather_response.usage
+    if hasattr(usage, "cache_read_input_tokens") and usage.cache_read_input_tokens:
+        print(f"💾 Cache hit: {usage.cache_read_input_tokens} tokens read from cache")
+    elif hasattr(usage, "cache_creation_input_tokens") and usage.cache_creation_input_tokens:
+        print(f"💾 Cache written: {usage.cache_creation_input_tokens} tokens cached for next run")
+
 except Exception as e:
     print(f"❌ Claude API error: {e}")
     dev.close()
@@ -227,7 +260,6 @@ except Exception as e:
 
 # Parse the JSON list of required values
 try:
-    # Strip markdown fences if Claude added them
     clean = gather_raw.replace("```json", "").replace("```", "").strip()
     required_values = json.loads(clean)
 except Exception:
@@ -257,7 +289,6 @@ if required_values:
             label += " [optional]"
         label += ": "
 
-        # Use getpass for anything that looks like a password or key
         is_secret = any(w in key.lower() for w in ["password", "key", "secret", "community"])
         if is_secret:
             value = getpass(label)
@@ -269,7 +300,6 @@ if required_values:
 
     print("")
 
-# Build a values summary to inject into the config prompt
 values_block = ""
 if collected:
     values_block = "\n\nSite-specific values provided by the operator:\n"
@@ -279,10 +309,10 @@ if collected:
 # ── Pass 2: Generate the actual configuration ─────────────────────────────────
 print(f"🤖 Generating configuration...")
 
-system_prompt = (
+config_system = (
     "You are an expert Juniper network engineer. You will be given:\n"
-    "1. The current running configuration of a Junos device in set format\n"
-    "2. Reference snippets from Juniper Day One books\n"
+    "1. Reference snippets from Juniper Day One books\n"
+    "2. The current running configuration of a Junos device in set format\n"
     "3. A task to perform\n"
     "4. Site-specific values provided by the operator\n\n"
     "Your job is to generate ONLY the set and delete commands needed to complete the task.\n\n"
@@ -301,23 +331,40 @@ system_prompt = (
     "10. Do not output anything except set/delete commands or CANNOT_COMPLETE."
 )
 
-user_prompt = (
-    f"Current device configuration:\n\n{config_text}\n\n"
-    f"Reference material from Juniper Day One books:\n\n{context}\n\n"
-    f"Task: {task}"
-    f"{values_block}\n\n"
-    f"Output only the set/delete commands needed:"
-)
-
 try:
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
+        system=[
+            {
+                "type": "text",
+                "text": config_system,
+                "cache_control": {"type": "ephemeral"}  # cache config system prompt
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    cached_book_context,   # cache hit if within 5 min TTL
+                    cached_device_config,  # cache hit if within 5 min TTL
+                    {
+                        "type": "text",
+                        "text": f"Task: {task}{values_block}\n\nOutput only the set/delete commands needed:"
+                    }
+                ]
+            }
+        ],
         temperature=0
     )
     raw_output = message.content[0].text.strip()
+
+    usage = message.usage
+    if hasattr(usage, "cache_read_input_tokens") and usage.cache_read_input_tokens:
+        print(f"💾 Cache hit: {usage.cache_read_input_tokens} tokens read from cache")
+    elif hasattr(usage, "cache_creation_input_tokens") and usage.cache_creation_input_tokens:
+        print(f"💾 Cache written: {usage.cache_creation_input_tokens} tokens cached for next run")
+
 except anthropic.AuthenticationError:
     print("❌ Invalid API key.")
     dev.close()
@@ -349,18 +396,14 @@ if not raw_commands:
     sys.exit(0)
 
 # ── Sanitise commands ─────────────────────────────────────────────────────────
-# Fix common Claude mistakes before sending to the device
-
-# Known invalid or incomplete commands that Claude sometimes generates
 INVALID_COMMANDS = [
-    "set chassis aggregated-devices ethernet device-count 0",  # 0 is invalid, range is 1-128
-    "set system ddos-protection global bandwidth-scale",       # not valid on EX2300
-    "set system ddos-protection global burst-scale",           # not valid on EX2300
+    "set chassis aggregated-devices ethernet device-count 0",
+    "set system ddos-protection global bandwidth-scale",
+    "set system ddos-protection global burst-scale",
 ]
 
-# Commands that are incomplete without additional values — skip if they match these prefixes
 INCOMPLETE_PREFIXES = [
-    "set system ntp authentication-key",   # requires a real key value we don't collect
+    "set system ntp authentication-key",
 ]
 
 PLACEHOLDERS = ["$9$\"\"", "$9$", "<value>", "<password>", "<key>", "YOUR_", "REPLACE", "CHANGE_THIS"]
@@ -369,24 +412,19 @@ commands = []
 warnings = []
 
 for cmd in raw_commands:
-    # Skip lines where Claude embedded CANNOT_COMPLETE inside a command
     if "CANNOT_COMPLETE" in cmd:
         warnings.append(f"  ⚠️  Skipped (Claude could not complete): '{cmd}'")
         continue
 
-    # Skip known invalid commands
     if any(cmd.startswith(invalid) or cmd == invalid for invalid in INVALID_COMMANDS):
         warnings.append(f"  ⚠️  Skipped (invalid command): '{cmd}'")
         continue
 
-    # Skip incomplete commands that require values we don't have
     if any(cmd.startswith(prefix) for prefix in INCOMPLETE_PREFIXES):
         warnings.append(f"  ⚠️  Skipped (incomplete — requires manual value): '{cmd}'")
         warnings.append(f"       Configure NTP authentication manually with a real key value.")
         continue
 
-    # Fix: "set X Y disable" → "delete X Y"
-    # Junos does not accept 'disable' as a set argument — use delete instead
     if cmd.startswith("set ") and cmd.endswith(" disable"):
         fixed = "delete " + cmd[4:-8].strip()
         warnings.append(f"  ⚠️  Fixed: '{cmd}'")
@@ -394,7 +432,6 @@ for cmd in raw_commands:
         commands.append(fixed)
         continue
 
-    # Flag: commands containing placeholder values
     if any(p in cmd for p in PLACEHOLDERS):
         warnings.append(f"  ⚠️  Skipped (placeholder value): '{cmd}'")
         warnings.append(f"       Replace the placeholder with a real value and apply manually.")
@@ -424,7 +461,6 @@ if warnings:
 
 if not commands:
     print("\n⚠️  No valid commands remain after sanitisation.")
-    print("   All commands were either fixed to delete form or skipped as placeholders.")
     print("   Review the warnings above and apply manually if needed.")
     dev.close()
     sys.exit(0)

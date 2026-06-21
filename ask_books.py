@@ -17,11 +17,11 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH        = "/home/geekom/juniper_vector_db"
+DB_PATH        = os.path.join(os.path.expanduser("~"), "juniper_vector_db")
 TOP_K          = 6      # number of chunks to keep after filtering
 FETCH_K        = 12     # fetch more candidates before filtering/dedup
 MAX_CONTEXT    = 7000   # max characters of context sent to Claude
-MIN_RELEVANCE  = 1.2    # ChromaDB L2 distance ceiling (tightened from 1.4)
+MIN_RELEVANCE  = 1.2    # ChromaDB L2 distance ceiling
 CLAUDE_MODEL   = "claude-sonnet-4-6"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ except Exception as e:
 try:
     results = collection.query(
         query_texts=[question],
-        n_results=FETCH_K,   # fetch more, filter down below
+        n_results=FETCH_K,
         include=["documents", "metadatas", "distances"]
     )
 except Exception as e:
@@ -107,7 +107,15 @@ for doc, meta, dist in relevant:
 
 context = "\n\n---\n\n".join(context_parts)
 
-# ── Build prompt & call Claude ────────────────────────────────────────────────
+print(f"📖 Found {len(relevant)} relevant chunk(s). Asking Claude...\n")
+
+# ── Build prompt & call Claude with prompt caching ────────────────────────────
+# Cache strategy:
+#   - system prompt: static, cache it (breakpoint 1)
+#   - book context: changes per question but worth caching for follow-up queries
+#     within the 5 minute TTL window (breakpoint 2)
+#   - question: always dynamic, never cached
+
 system_prompt = (
     "You are an expert Juniper Network Engineer specialising in Junos OS. "
     "Answer the user's question using ONLY the provided text snippets.\n\n"
@@ -125,25 +133,49 @@ system_prompt = (
     "7. Use plain text only, no markdown, no asterisks, no bullet symbols."
 )
 
-user_prompt = (
-    f"Context snippets from Juniper Day One books:\n\n{context}\n\n"
-    f"Question: {question}\n\n"
-    f"Show the actual Junos CLI commands first, then explain each one clearly:"
-)
-
-print(f"📖 Found {len(relevant)} relevant chunk(s). Asking Claude...\n")
-
-# ── Claude API call ───────────────────────────────────────────────────────────
 try:
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from environment
+    client = anthropic.Anthropic()
 
     message = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}]
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"}  # breakpoint 1: cache system prompt
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Context snippets from Juniper Day One books:\n\n{context}",
+                        "cache_control": {"type": "ephemeral"}  # breakpoint 2: cache book context
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"\nQuestion: {question}\n\n"
+                            f"Show the actual Junos CLI commands first, then explain each one clearly:"
+                        )
+                        # no cache_control — question is always dynamic
+                    }
+                ]
+            }
+        ]
     )
+
     answer = message.content[0].text
+
+    # Show cache stats if available
+    usage = message.usage
+    if hasattr(usage, "cache_read_input_tokens") and usage.cache_read_input_tokens:
+        print(f"💾 Cache hit: {usage.cache_read_input_tokens} tokens read from cache")
+    elif hasattr(usage, "cache_creation_input_tokens") and usage.cache_creation_input_tokens:
+        print(f"💾 Cache written: {usage.cache_creation_input_tokens} tokens cached for next run")
 
 except anthropic.AuthenticationError:
     print("❌ Invalid API key. Set ANTHROPIC_API_KEY in your environment:")

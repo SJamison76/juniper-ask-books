@@ -2,7 +2,7 @@
 
 A local system for querying Juniper Day One books using natural language. Ask questions about Junos OS configuration and get answers with actual CLI commands and config examples pulled directly from the books.
 
-Includes an experimental AI configurator that can read a live device config and apply changes based on the books. See do_configure.py below.
+Includes an experimental AI configurator that can read a live device config, ask you for site-specific values, and apply changes based on the books. See do_configure.py below.
 
 ---
 
@@ -142,11 +142,20 @@ Example output:
 
 WARNING: This script connects to a live device and can apply configuration changes.
 Use in a lab environment only. Always review the proposed changes before confirming.
+A human should always review the output — this tool assists engineers, it does not
+replace them.
 
-do_configure.py reads the current config from a Junos device via NETCONF, searches
-the book index for relevant guidance, and asks Claude to generate only the commands
-needed to complete the task. It then runs a commit check and asks for confirmation
-before applying anything.
+do_configure.py works in two passes:
+
+Pass 1 — Claude analyses the task and the current device config, then asks you for
+any site-specific values it needs such as NTP server IPs, syslog servers, TACACS+
+credentials, management subnets, SNMP community strings, and login banners. Optional
+items can be left blank and will be skipped.
+
+Pass 2 — Claude generates the full set of Junos commands using your answers, cross-
+referenced against the indexed Day One books. The script runs a commit check on the
+device and shows you the proposed changes before asking for confirmation. Nothing is
+applied until you type yes.
 
 Requires PyEZ and NETCONF enabled on the device:
 
@@ -180,33 +189,65 @@ Example session:
     Password:
 
     🔌 Connecting to 192.168.1.1 via NETCONF...
-    ✅ Connected. Model: EX2300-24T  Junos: 22.4R3.25
+    ✅ Connected. Model: EX2300-C-12P  Junos: 23.2R2-S7.5
 
     📥 Pulling current device configuration...
-    ✅ Retrieved config (4721 characters)
+    ✅ Retrieved config (4221 characters)
 
     🔍 Searching knowledge base for: harden this switch
-    ✅ Found 6 relevant chunk(s) from 2 source(s)
+    ✅ Found 6 relevant chunk(s) from 3 source(s)
 
-    🤖 Asking Claude to generate configuration...
+    🤖 Analysing task requirements...
+
+    ============================================================
+     I NEED A FEW VALUES TO COMPLETE THIS TASK
+     Leave blank to skip optional items.
+    ============================================================
+
+      What is the IP address of the TACACS+ server? (e.g. 192.168.1.10) [optional]: 192.168.10.1
+      What is the TACACS+ shared secret key? (e.g. MyT@cacs$ecret123) [optional]:
+      What is the primary NTP server IP address or hostname? (e.g. 192.168.1.20): 1.1.1.1
+      What is the secondary NTP server IP address (if any)? (e.g. 192.168.1.21) [optional]: 2.2.2.2
+      What is the IP address of the remote syslog server? (e.g. 192.168.1.30) [optional]: 192.168.10.30
+      What is the management subnet permitted to access this device? (e.g. 10.0.0.0/24): 192.168.10.0/24
+      What login banner should be displayed at login? [optional]: Authorized access only.
+
+    🤖 Generating configuration...
 
     ============================================================
      PROPOSED CONFIGURATION CHANGES
     ============================================================
-      delete system services telnet
-      delete system services ftp
+      delete interfaces me0 unit 0 family inet dhcp
+      set interfaces me0 unit 0 family inet address 192.168.10.203/24
+      set routing-options static route 0.0.0.0/0 next-hop 192.168.10.1
+      set system login message "Authorized access only."
       set system services ssh root-login deny
       set system services ssh protocol-version v2
-      set system login message "UNAUTHORIZED ACCESS IS PROHIBITED"
-      set system ntp authentication-key 1 type md5 value "$9$abc123"
-      set snmp v3 usm local-engine user netops authentication-sha
-      delete snmp community public
-      set system syslog host 10.0.0.50 any any
-      set system syslog host 10.0.0.50 port 514
-      set protocols lldp interface all
-      set ethernet-switching-options storm-control default
+      set system services ssh connection-limit 5
+      set system services ssh rate-limit 5
+      delete system services xnm-clear-text
+      set system tacplus-server 192.168.10.1 secret <secret>
+      set system authentication-order [ tacplus password ]
+      set system ntp server 1.1.1.1
+      set system ntp server 2.2.2.2
+      set system syslog host 192.168.10.30 any any
+      set system syslog host 192.168.10.30 port 514
+      set firewall family inet filter PROTECT-RE term ALLOW-MGMT from source-address 192.168.10.0/24
+      set firewall family inet filter PROTECT-RE term ALLOW-MGMT from destination-port ssh
+      set firewall family inet filter PROTECT-RE term ALLOW-MGMT then accept
+      set firewall family inet filter PROTECT-RE term ALLOW-NETCONF from source-address 192.168.10.0/24
+      set firewall family inet filter PROTECT-RE term ALLOW-NETCONF from destination-port 830
+      set firewall family inet filter PROTECT-RE term ALLOW-NETCONF then accept
+      set firewall family inet filter PROTECT-RE term ALLOW-NTP from source-address 1.1.1.1/32
+      set firewall family inet filter PROTECT-RE term ALLOW-NTP from source-address 2.2.2.2/32
+      set firewall family inet filter PROTECT-RE term ALLOW-NTP from destination-port ntp
+      set firewall family inet filter PROTECT-RE term ALLOW-NTP then accept
+      set firewall family inet filter PROTECT-RE term ALLOW-ICMP from protocol icmp
+      set firewall family inet filter PROTECT-RE term ALLOW-ICMP then accept
+      set firewall family inet filter PROTECT-RE term DENY-ALL then discard
+      set interfaces me0 unit 0 family inet filter input PROTECT-RE
     ============================================================
-     12 command(s) | Sources: TW_HardeningJunosDevices_2ndEd.pdf
+     29 command(s) | Sources: TW_HardeningJunosDevices_2ndEd.pdf, DO_ConfiguringEX_3rdEd.pdf
     ============================================================
 
     🔍 Running commit check (dry run)...
@@ -222,13 +263,17 @@ Example session:
     ============================================================
      Task   : harden this switch
      Device : 192.168.1.1
-     Changes: 12 command(s) applied
+     Changes: 29 command(s) applied
     ============================================================
 
-Claude reads the current config before generating commands, so it only produces
-changes for things not already configured. If telnet is already disabled it will
-not include that command. The commit check validates the config on the device
-before anything is applied, and the script rolls back automatically if the commit fails.
+Claude reads the current config before generating commands so it only produces
+changes for things not already configured. The commit check validates the config
+on the device before anything is applied, and the script rolls back automatically
+if the commit fails.
+
+Always review the warnings section — some commands may be skipped if values were
+not provided or if the sanitiser detected invalid syntax. Apply those manually if
+needed.
 
 ---
 
