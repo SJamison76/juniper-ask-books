@@ -2,14 +2,16 @@
 
 A local system for querying Juniper Day One books using natural language. Ask questions about Junos OS configuration and get answers with actual CLI commands and config examples pulled directly from the books.
 
-Includes an AI configurator that connects to live devices and applies changes, and an offline config auditor that critiques configs against the books without touching any device.
+Includes an interactive chat mode for follow-up questions, an AI configurator that connects to live devices and applies changes, and an offline config auditor that critiques configs against the books without touching any device.
 
 ---
 
 ## How It Works
 
 1. PDF books are chunked and embedded into a local ChromaDB vector database using
-   the all-minilm embedding model running in Ollama.
+   the all-minilm embedding model running in Ollama. PyMuPDF is used for text
+   extraction to preserve whitespace, indentation, and Junos config block structure.
+   Chunking is line-aware so set commands and config stanzas are never split mid-line.
 
 2. When you ask a question, the query is embedded and used to find the most
    semantically relevant chunks from the books.
@@ -62,65 +64,77 @@ Place your Juniper Day One PDF books in /srv/ftp/dayone, then run:
 
 This will:
 - Create a Python virtual environment
-- Install all dependencies including the Anthropic SDK and PyEZ
+- Install all dependencies including the Anthropic SDK, PyMuPDF, and PyEZ
 - Pull the all-minilm embedding model via Ollama
-- Index all PDFs into the ChromaDB vector database
+- Index all PDFs into the ChromaDB vector database using PyMuPDF for accurate
+  text extraction with preserved formatting and line-aware chunking
 
-Indexing 30 books takes approximately 10 to 20 minutes. Progress is saved after
+Indexing 36 books takes approximately 10 to 20 minutes. Progress is saved after
 each book so if the process is interrupted it will resume where it left off.
+
+If you add new books or want to reindex from scratch:
+
+    rm -rf ~/juniper_vector_db ~/juniper_index_checkpoint.json
+    ./juniper-env/bin/python index_books.py
 
 ---
 
 ## Usage: ask_books.py
 
-Ask any question about Junos OS in plain English.
+Ask any question about Junos OS in plain English. Supports both single question
+mode and an interactive chat loop with conversation history.
 
-    python3 ask_books.py "your question here"
+Single question mode:
+
+    ./juniper-env/bin/python ask_books.py "your question here"
+
+Interactive chat mode (follow-up questions, conversation history maintained):
+
+    ./juniper-env/bin/python ask_books.py
 
 Examples:
 
-    python3 ask_books.py "how do I configure a BGP neighbor?"
-    python3 ask_books.py "show me OSPF area configuration on Junos"
-    python3 ask_books.py "how do I configure EVPN VXLAN on an EX switch?"
-    python3 ask_books.py "what is the Junos command to check BGP neighbor state?"
+    ./juniper-env/bin/python ask_books.py "how do I configure a BGP neighbor?"
+    ./juniper-env/bin/python ask_books.py "show me OSPF area configuration on Junos"
+    ./juniper-env/bin/python ask_books.py "how do I configure EVPN VXLAN on an EX switch?"
 
-Example output:
+Example interactive session:
 
-    $ python3 ask_books.py "show me a complete EBGP configuration with authentication and route policy on Junos"
+    $ ./juniper-env/bin/python ask_books.py
+    ╔══════════════════════════════════════════════════════════╗
+    ║         Juniper Day One - Interactive Q&A                ║
+    ║  Ask questions about Junos OS. Type 'exit' to quit.      ║
+    ╚══════════════════════════════════════════════════════════╝
+
+    Ask a question (or 'exit' to quit): how do I configure OSPF?
+
+    📖 Found 10 relevant chunk(s). Asking Claude...
+    💾 Cache written: 1842 tokens cached for next run
+
     ============================================================
     ANSWER:
     ============================================================
-    Here is the complete EBGP configuration with authentication and route policy:
+    EXAMPLE CONFIG:
+    set protocols ospf area 0 interface ge-0/0/0.0
+    set protocols ospf area 0 interface ge-0/0/1.0
 
-    set protocols bgp group EBGP type external
-    set protocols bgp group EBGP peer-as 65001
-    set protocols bgp group EBGP neighbor 10.0.0.1
-    set protocols bgp group EBGP authentication key "my_secret_key"
-    set protocols bgp group EBGP authentication algorithm md5
-    set policy-options policy-statement send-direct term 1 from protocol direct
-    set policy-options policy-statement send-direct term 1 then accept
+    set protocols ospf area 0 interface ge-0/0/0.0
+      Places ge-0/0/0.0 into OSPF area 0. The .0 is the logical unit number.
 
-    Explanation:
-
-    set protocols bgp group EBGP type external
-      Sets up an External BGP peer group called EBGP. The type external keyword
-      specifies this is an EBGP peer, as opposed to an IBGP peer.
-
-    set protocols bgp group EBGP peer-as 65001
-      Sets the Autonomous System Number for the EBGP peer group. Replace with
-      your actual peer ASN.
-
-    set protocols bgp group EBGP neighbor 10.0.0.1
-      Specifies the IP address of the neighboring router. Replace with the actual
-      IP address of your BGP neighbor.
-
+    set protocols ospf area 0 interface ge-0/0/1.0
+      Does the same for the second uplink interface.
     ============================================================
     SOURCES:
-      EX_Series_UpRunning.pdf — p.177
-      junos-beginners-guide.pdf — p.9
-      ExploreJunosCLI_2ndEd.pdf — p.80
-      TW_HardeningJunosDevices_2ndEd.pdf — p.96, p.151
+      Junos4IOS book.pdf — p.21, p.29
+      junos-beginners-guide.pdf — p.227
     ============================================================
+
+    Ask a question (or 'exit' to quit): how do I add authentication to that?
+
+    📖 Found 10 relevant chunk(s). Asking Claude...
+    💾 Cache hit: 1842 tokens read from cache
+
+    ...
 
 ---
 
@@ -129,21 +143,25 @@ Example output:
 Offline config auditor. Reads a config file and critiques it against the indexed
 Day One books. No device connection required. Safe to use on any config.
 
-    python3 critique_config.py <config.txt> [focus]
+    ./juniper-env/bin/python critique_config.py <config.txt> [focus]
 
 Examples:
 
-    python3 critique_config.py config.txt
-    python3 critique_config.py config.txt "harden this config"
-    python3 critique_config.py config.txt "review BGP configuration"
-    python3 critique_config.py config.txt "check OSPF setup"
+    ./juniper-env/bin/python critique_config.py config.txt
+    ./juniper-env/bin/python critique_config.py config.txt "harden this config"
+    ./juniper-env/bin/python critique_config.py config.txt "review BGP configuration"
+    ./juniper-env/bin/python critique_config.py config.txt "check OSPF setup"
 
 If no focus is given a general best-practice review is performed.
 
 To pull a config from a device for review:
 
     ssh admin@192.168.1.1 "show configuration | display set" > config.txt
-    python3 critique_config.py config.txt "harden this config"
+    ./juniper-env/bin/python critique_config.py config.txt "harden this config"
+
+Output is structured as four sections — Summary, Issues (with fix commands),
+Recommendations, and Correct. At the end you are offered the option to save
+the critique to a text file.
 
 Example output:
 
@@ -173,8 +191,6 @@ Example output:
     NETCONF configured with rfc-compliant and yang-compliant flags.
     Syslog captures auth, firewall, and interactive-commands events.
     ============================================================
-
-At the end you are offered the option to save the critique to a text file.
 
 ---
 
@@ -212,71 +228,6 @@ Examples:
     ./juniper-env/bin/python do_configure.py 192.168.1.1 "set up NTP with authentication"
     ./juniper-env/bin/python do_configure.py 192.168.1.1 "disable unused services and secure SSH"
 
-Example session:
-
-    $ ./juniper-env/bin/python do_configure.py 192.168.1.1 "harden this switch"
-    ============================================================
-     Juniper AI Configurator
-     Device : 192.168.1.1
-     Task   : harden this switch
-    ============================================================
-
-    Username: admin
-    Password:
-
-    🔌 Connecting to 192.168.1.1 via NETCONF...
-    ✅ Connected. Model: EX2300-C-12P  Junos: 23.2R2-S7.5
-
-    📥 Pulling current device configuration...
-    ✅ Retrieved config (4221 characters)
-
-    🔍 Searching knowledge base for: harden this switch
-    ✅ Found 12 relevant chunk(s) from 3 source(s)
-
-    🤖 Analysing task requirements...
-    💾 Cache written: 3892 tokens cached for next run
-
-    ============================================================
-     I NEED A FEW VALUES TO COMPLETE THIS TASK
-     Leave blank to skip optional items.
-    ============================================================
-
-      What is the primary NTP server IP address? (e.g. 192.168.1.20): 1.1.1.1
-      What is the IP address of the remote syslog server? (e.g. 192.168.1.30) [optional]: 10.0.0.50
-      What is the management subnet permitted to access this device? (e.g. 10.0.0.0/24): 192.168.10.0/24
-      What login banner should be displayed at login? [optional]: Authorized access only.
-
-    🤖 Generating configuration...
-    💾 Cache hit: 3971 tokens read from cache
-
-    ============================================================
-     PROPOSED CONFIGURATION CHANGES
-    ============================================================
-      delete system services xnm-clear-text
-      delete interfaces me0 unit 0 family inet dhcp
-      set system login message "Authorized access only."
-      set system services ssh root-login deny
-      set system services ssh protocol-version v2
-      set system services ssh connection-limit 5
-      set system ntp server 1.1.1.1
-      set system syslog host 10.0.0.50 any any
-      set firewall family inet filter PROTECT-RE term ALLOW-MGMT from source-address 192.168.10.0/24
-      set firewall family inet filter PROTECT-RE term ALLOW-MGMT from destination-port ssh
-      set firewall family inet filter PROTECT-RE term ALLOW-MGMT then accept
-      set firewall family inet filter PROTECT-RE term DENY-ALL then discard
-      set interfaces me0 unit 0 family inet filter input PROTECT-RE
-    ============================================================
-     13 command(s) | Sources: TW_HardeningJunosDevices_2ndEd.pdf
-    ============================================================
-
-    🔍 Running commit check (dry run)...
-    ✅ Commit check passed — configuration is valid.
-
-    Apply this configuration? (yes/no): yes
-
-    📤 Applying configuration...
-    ✅ Configuration committed successfully.
-
 Claude reads the current config before generating commands so it only produces
 changes for things not already configured. The commit check validates the config
 on the device before anything is applied, and the script rolls back automatically
@@ -290,10 +241,10 @@ not provided or if the sanitiser detected invalid syntax.
 ## File Structure
 
     juniper-ask-books/
-    |-- ask_books.py              Query the vector database and generate answers
+    |-- ask_books.py              Query the books — single question or interactive chat
     |-- critique_config.py        Offline config auditor — no device connection needed
     |-- do_configure.py           AI configurator — reads device and applies changes
-    |-- index_books.py            Index PDF books into ChromaDB
+    |-- index_books.py            Index PDF books into ChromaDB via PyMuPDF
     |-- requirements.txt          Python dependencies
     |-- setup.sh                  Automated setup script
     |-- .gitignore                Excludes venv, database, and PDFs from git
@@ -306,10 +257,11 @@ not provided or if the sanitiser detected invalid syntax.
 
 ## Re-indexing
 
-To re-index from scratch (for example after adding new books):
+To re-index from scratch (for example after adding new books or after upgrading
+index_books.py):
 
-    rm -rf juniper_vector_db juniper_index_checkpoint.json
-    python3 index_books.py
+    rm -rf ~/juniper_vector_db ~/juniper_index_checkpoint.json
+    ./juniper-env/bin/python index_books.py
 
 Note: DB_PATH and CHECKPOINT_FILE in index_books.py default to your home directory.
 If you are running as a different user, update those paths at the top of the script.
@@ -325,14 +277,14 @@ Key settings are at the top of each script:
 
 index_books.py:
 - BOOK_DIR       Path to PDF books (default /srv/ftp/dayone)
-- DB_PATH        Path to ChromaDB database
-- CHUNK_SIZE     Characters per chunk (default 1200)
-- CHUNK_STEP     Step between chunks, controls overlap (default 900)
+- DB_PATH        Path to ChromaDB database (default ~/juniper_vector_db)
+- CHUNK_SIZE     Max characters per chunk (default 1200)
+- CHUNK_STEP     Overlap step between chunks (default 900)
 
 ask_books.py:
-- TOP_K          Number of chunks to keep after filtering (default 6)
-- FETCH_K        Number of candidates to fetch before filtering (default 12)
-- MAX_CONTEXT    Max characters of context sent to Claude (default 7000)
+- TOP_K          Number of chunks to keep after filtering (default 10)
+- FETCH_K        Number of candidates to fetch before filtering (default 20)
+- MAX_CONTEXT    Max characters of context sent to Claude (default 14000)
 - MIN_RELEVANCE  L2 distance threshold, lower is stricter (default 1.2)
 - CLAUDE_MODEL   Anthropic model to use (default claude-sonnet-4-6)
 
