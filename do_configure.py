@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import anthropic
 import chromadb
 from chromadb.utils import embedding_functions
@@ -7,7 +8,7 @@ from dotenv import load_dotenv
 from getpass import getpass
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DB_PATH        = "/home/geekom/juniper_vector_db"
+DB_PATH        = os.path.join(os.path.expanduser("~"), "juniper_vector_db")
 TOP_K          = 6      # number of chunks to keep after filtering
 FETCH_K        = 12     # fetch more candidates before filtering/dedup
 MAX_CONTEXT    = 6000   # chars of book context sent to Claude
@@ -180,38 +181,141 @@ for doc, meta, dist in relevant:
 context = "\n\n---\n\n".join(context_parts)
 print(f"✅ Found {len(relevant)} relevant chunk(s) from {len(sources)} source(s)")
 
-# ── Ask Claude ────────────────────────────────────────────────────────────────
-print(f"\n🤖 Asking Claude to generate configuration...")
+# ── Pass 1: Ask Claude what values it needs ───────────────────────────────────
+print(f"\n🤖 Analysing task requirements...")
+
+gather_system = (
+    "You are an expert Juniper network engineer.\n"
+    "You will be given a device config, reference material, and a task.\n"
+    "Your job is to identify what site-specific values are needed to complete the task.\n\n"
+    "Site-specific values are things like: IP addresses, NTP server IPs, syslog server IPs,\n"
+    "SNMP community strings, authentication keys, management subnets, VLAN IDs, AS numbers,\n"
+    "interface names, BGP neighbor IPs, passwords, or any other value unique to this network.\n\n"
+    "Do NOT ask for values that are already present in the current device config.\n"
+    "Do NOT ask for values that have sensible defaults (e.g. SSH protocol version).\n"
+    "Only ask for values that are genuinely required and unknown.\n\n"
+    "Output a JSON array of objects. Each object must have:\n"
+    "  - key: a short identifier (e.g. ntp_server, mgmt_subnet)\n"
+    "  - question: the question to ask the user\n"
+    "  - required: true or false\n"
+    "  - example: an example value\n\n"
+    "If no values are needed, output an empty array: []\n"
+    "Output ONLY the JSON array, no explanation, no markdown."
+)
+
+gather_prompt = (
+    f"Current device configuration:\n\n{config_text}\n\n"
+    f"Reference material:\n\n{context}\n\n"
+    f"Task: {task}\n\n"
+    f"What site-specific values are needed to complete this task?"
+)
+
+try:
+    client = anthropic.Anthropic()
+    gather_response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=gather_system,
+        messages=[{"role": "user", "content": gather_prompt}],
+        temperature=0
+    )
+    gather_raw = gather_response.content[0].text.strip()
+except Exception as e:
+    print(f"❌ Claude API error: {e}")
+    dev.close()
+    sys.exit(1)
+
+# Parse the JSON list of required values
+try:
+    # Strip markdown fences if Claude added them
+    clean = gather_raw.replace("```json", "").replace("```", "").strip()
+    required_values = json.loads(clean)
+except Exception:
+    required_values = []
+
+# ── Interactive value collection ──────────────────────────────────────────────
+collected = {}
+
+if required_values:
+    print("")
+    print("=" * 60)
+    print(" I NEED A FEW VALUES TO COMPLETE THIS TASK")
+    print(" Leave blank to skip optional items.")
+    print("=" * 60)
+    print("")
+
+    for item in required_values:
+        key      = item.get("key", "value")
+        question = item.get("question", key)
+        required = item.get("required", False)
+        example  = item.get("example", "")
+
+        label = f"  {question}"
+        if example:
+            label += f" (e.g. {example})"
+        if not required:
+            label += " [optional]"
+        label += ": "
+
+        # Use getpass for anything that looks like a password or key
+        is_secret = any(w in key.lower() for w in ["password", "key", "secret", "community"])
+        if is_secret:
+            value = getpass(label)
+        else:
+            value = input(label).strip()
+
+        if value:
+            collected[key] = value
+
+    print("")
+
+# Build a values summary to inject into the config prompt
+values_block = ""
+if collected:
+    values_block = "\n\nSite-specific values provided by the operator:\n"
+    for k, v in collected.items():
+        values_block += f"  {k}: {v}\n"
+
+# ── Pass 2: Generate the actual configuration ─────────────────────────────────
+print(f"🤖 Generating configuration...")
 
 system_prompt = (
     "You are an expert Juniper network engineer. You will be given:\n"
     "1. The current running configuration of a Junos device in set format\n"
     "2. Reference snippets from Juniper Day One books\n"
-    "3. A task to perform\n\n"
-    "Your job is to generate ONLY the set commands needed to complete the task.\n\n"
+    "3. A task to perform\n"
+    "4. Site-specific values provided by the operator\n\n"
+    "Your job is to generate ONLY the set and delete commands needed to complete the task.\n\n"
     "RULES:\n"
     "1. Analyse the current config first. Do NOT generate commands for things already correctly configured.\n"
-    "2. Output ONLY the set commands, one per line, no explanations, no headers.\n"
+    "2. Output ONLY set or delete commands, one per line, no explanations, no headers.\n"
     "3. Use exact Junos set command syntax.\n"
-    "4. If a setting needs to be removed first, include the 'delete' command before the 'set' command.\n"
-    "5. If the task cannot be completed safely from the available information, output only: CANNOT_COMPLETE: <reason>\n"
-    "6. Do not output anything except set/delete commands or CANNOT_COMPLETE."
+    "4. To disable or remove something always use 'delete', never 'set X disable'.\n"
+    "5. Use the operator-provided values where needed. "
+    "If a required value was not provided, skip those commands entirely.\n"
+    "6. Be comprehensive — generate all commands needed to fully complete the task.\n"
+    "7. If assigning a static IP to me0, always include 'delete interfaces me0 unit 0 family inet dhcp' first.\n"
+    "8. Never use a network address (e.g. 192.168.10.0/24) as a host address — use the actual device IP.\n"
+    "   If the operator provided a subnet but not a specific host IP, skip the static IP assignment.\n"
+    "9. If the task cannot be completed safely, output only: CANNOT_COMPLETE: <reason>\n"
+    "10. Do not output anything except set/delete commands or CANNOT_COMPLETE."
 )
 
 user_prompt = (
     f"Current device configuration:\n\n{config_text}\n\n"
     f"Reference material from Juniper Day One books:\n\n{context}\n\n"
-    f"Task: {task}\n\n"
+    f"Task: {task}"
+    f"{values_block}\n\n"
     f"Output only the set/delete commands needed:"
 )
 
 try:
-    client = anthropic.Anthropic()
     message = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}]
+        messages=[{"role": "user", "content": user_prompt}],
+        temperature=0
     )
     raw_output = message.content[0].text.strip()
 except anthropic.AuthenticationError:
@@ -231,18 +335,72 @@ if raw_output.startswith("CANNOT_COMPLETE"):
     sys.exit(0)
 
 # Parse commands — only lines starting with set or delete
-commands = [
+raw_commands = [
     line.strip()
     for line in raw_output.splitlines()
     if line.strip().startswith(("set ", "delete "))
 ]
 
-if not commands:
+if not raw_commands:
     print("\n⚠️  Claude did not generate any valid set/delete commands.")
     print("   Raw output:")
     print(raw_output)
     dev.close()
     sys.exit(0)
+
+# ── Sanitise commands ─────────────────────────────────────────────────────────
+# Fix common Claude mistakes before sending to the device
+
+# Known invalid or incomplete commands that Claude sometimes generates
+INVALID_COMMANDS = [
+    "set chassis aggregated-devices ethernet device-count 0",  # 0 is invalid, range is 1-128
+    "set system ddos-protection global bandwidth-scale",       # not valid on EX2300
+    "set system ddos-protection global burst-scale",           # not valid on EX2300
+]
+
+# Commands that are incomplete without additional values — skip if they match these prefixes
+INCOMPLETE_PREFIXES = [
+    "set system ntp authentication-key",   # requires a real key value we don't collect
+]
+
+PLACEHOLDERS = ["$9$\"\"", "$9$", "<value>", "<password>", "<key>", "YOUR_", "REPLACE", "CHANGE_THIS"]
+
+commands = []
+warnings = []
+
+for cmd in raw_commands:
+    # Skip lines where Claude embedded CANNOT_COMPLETE inside a command
+    if "CANNOT_COMPLETE" in cmd:
+        warnings.append(f"  ⚠️  Skipped (Claude could not complete): '{cmd}'")
+        continue
+
+    # Skip known invalid commands
+    if any(cmd.startswith(invalid) or cmd == invalid for invalid in INVALID_COMMANDS):
+        warnings.append(f"  ⚠️  Skipped (invalid command): '{cmd}'")
+        continue
+
+    # Skip incomplete commands that require values we don't have
+    if any(cmd.startswith(prefix) for prefix in INCOMPLETE_PREFIXES):
+        warnings.append(f"  ⚠️  Skipped (incomplete — requires manual value): '{cmd}'")
+        warnings.append(f"       Configure NTP authentication manually with a real key value.")
+        continue
+
+    # Fix: "set X Y disable" → "delete X Y"
+    # Junos does not accept 'disable' as a set argument — use delete instead
+    if cmd.startswith("set ") and cmd.endswith(" disable"):
+        fixed = "delete " + cmd[4:-8].strip()
+        warnings.append(f"  ⚠️  Fixed: '{cmd}'")
+        warnings.append(f"       → '{fixed}'")
+        commands.append(fixed)
+        continue
+
+    # Flag: commands containing placeholder values
+    if any(p in cmd for p in PLACEHOLDERS):
+        warnings.append(f"  ⚠️  Skipped (placeholder value): '{cmd}'")
+        warnings.append(f"       Replace the placeholder with a real value and apply manually.")
+        continue
+
+    commands.append(cmd)
 
 # ── Show proposed changes ─────────────────────────────────────────────────────
 print("")
@@ -254,6 +412,22 @@ for cmd in commands:
 print("=" * 60)
 print(f" {len(commands)} command(s) | Sources: {', '.join(sources.keys())}")
 print("=" * 60)
+
+if warnings:
+    print("")
+    print("=" * 60)
+    print(" WARNINGS (review before proceeding)")
+    print("=" * 60)
+    for w in warnings:
+        print(w)
+    print("=" * 60)
+
+if not commands:
+    print("\n⚠️  No valid commands remain after sanitisation.")
+    print("   All commands were either fixed to delete form or skipped as placeholders.")
+    print("   Review the warnings above and apply manually if needed.")
+    dev.close()
+    sys.exit(0)
 
 # ── Dry run / commit check ────────────────────────────────────────────────────
 print("\n🔍 Running commit check (dry run)...")
