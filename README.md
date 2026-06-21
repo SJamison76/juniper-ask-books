@@ -180,6 +180,26 @@ Recommended for day-to-day use: EX Switch + High only = approximately 25 rules,
 
 ---
 
+## Web Dashboard
+
+Audit reports are served via a local web dashboard that runs automatically on boot.
+No tools or SSH access needed — the team just opens a browser.
+
+    http://<a5-ip>:5000
+
+The dashboard shows all report folders with findings, compliance scores, STIG
+failures with fix commands, Day One critique issues, and links to download all
+report files including the STIG Viewer checklist.
+
+The dashboard is installed as a systemd service by setup.sh and starts
+automatically. To manage it manually:
+
+    sudo systemctl status juniper-dashboard
+    sudo systemctl restart juniper-dashboard
+    journalctl -u juniper-dashboard -f
+
+---
+
 ## STIG Viewer
 
 After a STIG audit completes, a populated .cklb checklist is automatically created
@@ -348,6 +368,7 @@ Examples:
 
     juniper-ask-books/
     |-- start.py                  Menu launcher for all tools
+    |-- dashboard.py              Web dashboard — runs as systemd service on port 5000
     |-- ask_books.py              Query the books — single question or interactive chat
     |-- critique_config.py        Offline config auditor — no device connection needed
     |-- stig_audit.py             DoD STIG compliance auditor

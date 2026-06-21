@@ -1,7 +1,8 @@
 #!/bin/bash
 # ── Juniper RAG Setup Script ──────────────────────────────────────────────────
 # Sets up the Python virtual environment, installs dependencies,
-# checks for Ollama, pulls required models, and indexes the books.
+# checks for Ollama, pulls required models, indexes the books,
+# and installs the web dashboard as a systemd service.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
@@ -10,6 +11,9 @@ VENV_DIR="./juniper-env"
 BOOK_DIR="/srv/ftp/dayone"
 STIG_DIR="/srv/ftp/stigs"
 EMBED_MODEL="all-minilm"
+DASHBOARD_PORT=5000
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURRENT_USER="$(whoami)"
 
 echo ""
 echo "============================================================"
@@ -126,12 +130,49 @@ if [ -d "$STIG_DIR" ]; then
     fi
 fi
 
+# ── Install web dashboard as systemd service ──────────────────────────────────
+echo ""
+echo "🌐 Installing web dashboard as systemd service..."
+
+SERVICE_FILE="/etc/systemd/system/juniper-dashboard.service"
+
+sudo tee "$SERVICE_FILE" > /dev/null << EOF
+[Unit]
+Description=Juniper AI Audit Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=$CURRENT_USER
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$SCRIPT_DIR/$VENV_DIR/bin/python $SCRIPT_DIR/dashboard.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable juniper-dashboard
+sudo systemctl restart juniper-dashboard
+
+# Get local IP for display
+LOCAL_IP=$(hostname -I | awk '{print $1}')
+
+echo "✅ Dashboard service installed and started."
+
 echo ""
 echo "============================================================"
 echo " ✅ Setup complete!"
 echo ""
 echo " Launch the menu:"
 echo "   $VENV_DIR/bin/python start.py"
+echo ""
+echo " Web dashboard (auto-starts on boot):"
+echo "   http://localhost:$DASHBOARD_PORT"
+echo "   http://$LOCAL_IP:$DASHBOARD_PORT  (team access)"
 echo ""
 echo " Or run scripts directly:"
 echo "   $VENV_DIR/bin/python ask_books.py"
