@@ -21,3 +21,4 @@ ollama.tgz
 .DS_Store
 Thumbs.db
 .env
+run.file
