@@ -9,9 +9,9 @@ from getpass import getpass
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH        = os.path.join(os.path.expanduser("~"), "juniper_vector_db")
-TOP_K          = 6      # number of chunks to keep after filtering
-FETCH_K        = 12     # fetch more candidates before filtering/dedup
-MAX_CONTEXT    = 6000   # chars of book context sent to Claude
+TOP_K          = 12     # number of chunks to keep after filtering
+FETCH_K        = 24     # fetch more candidates before filtering/dedup
+MAX_CONTEXT    = 12000  # chars of book context sent to Claude
 MIN_RELEVANCE  = 1.2    # ChromaDB L2 distance ceiling
 CLAUDE_MODEL   = "claude-sonnet-4-6"
 NETCONF_PORT   = 830
@@ -439,7 +439,35 @@ for cmd in raw_commands:
 
     commands.append(cmd)
 
-# ── Show proposed changes ─────────────────────────────────────────────────────
+# ── Order commands ────────────────────────────────────────────────────────────
+# Junos commit check validates references at apply time, so dependent objects
+# must be defined before they are referenced. Sort into safe apply order:
+#   1. delete commands first (clear conflicts)
+#   2. system/routing/protocols/snmp/firewall definitions
+#   3. interface commands last (may reference firewall filters)
+
+def command_order(cmd):
+    if cmd.startswith("delete"):
+        return 0
+    if cmd.startswith("set system"):
+        return 1
+    if cmd.startswith("set routing-options"):
+        return 2
+    if cmd.startswith("set protocols"):
+        return 3
+    if cmd.startswith("set snmp"):
+        return 4
+    if cmd.startswith("set firewall"):
+        return 5
+    if cmd.startswith("set interfaces"):
+        return 6
+    if cmd.startswith("set chassis"):
+        return 7
+    return 8
+
+commands.sort(key=command_order)
+
+
 print("")
 print("=" * 60)
 print(" PROPOSED CONFIGURATION CHANGES")
