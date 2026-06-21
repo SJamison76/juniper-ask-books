@@ -1,4 +1,4 @@
-# Juniper Day One RAG
+# Juniper Day One - Ask Books
 
 A local Retrieval-Augmented Generation (RAG) system for querying Juniper Day One
 books using natural language. Ask questions about Junos OS configuration and get
