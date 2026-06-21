@@ -1,5 +1,6 @@
 chromadb==1.5.9
 pypdf==6.13.3
+pymupdf
 anthropic
 python-dotenv
 junos-eznc

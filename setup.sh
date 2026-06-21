@@ -88,14 +88,27 @@ else
 fi
 
 # ── Index books ───────────────────────────────────────────────────────────────
+echo ""
 echo "📚 Indexing Juniper Day One books into ChromaDB..."
+echo "   Using PyMuPDF for accurate text extraction with preserved formatting."
 echo "   This will take several minutes depending on book count."
 echo ""
 "$VENV_DIR/bin/python" index_books.py
 
 echo ""
 echo "============================================================"
-echo " ✅ Setup complete! You can now query the books:"
+echo " ✅ Setup complete!"
+echo ""
+echo " Query the books:"
 echo "   $VENV_DIR/bin/python ask_books.py 'your question here'"
+echo ""
+echo " Interactive chat mode:"
+echo "   $VENV_DIR/bin/python ask_books.py"
+echo ""
+echo " Critique a config file:"
+echo "   $VENV_DIR/bin/python critique_config.py config.txt 'harden this config'"
+echo ""
+echo " Configure a device:"
+echo "   $VENV_DIR/bin/python do_configure.py 192.168.1.1 'harden this switch'"
 echo "============================================================"
 echo ""
